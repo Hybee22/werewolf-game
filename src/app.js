@@ -24,4 +24,4 @@ app.use("/api/game", gameRoutes);
 
 app.use(errorHandler);
 
-module.exports = { app };
+module.exports = app;
