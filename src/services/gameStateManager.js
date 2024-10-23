@@ -67,11 +67,14 @@ class GameStateManager {
       await this.players[i].save();
 
       if (this.players[i].role === "werewolf") {
+        console.log(this.players[i]);
         const userId = this.players[i].userId;
-        const user = await User.findById(userId);
-        werewolves.push({ ...this.players[i], name: user.username });
-
-        console.log(werewolves);
+        const user = await User.findOne({ _id: userId });
+        werewolves.push({
+          username: user.username,
+          _id: this.players[i]._id,
+          socketId: this.players[i].socketId,
+        });
       }
 
       // Inform each player of their role and its description
@@ -81,6 +84,8 @@ class GameStateManager {
       });
     }
 
+    console.log(werewolves);
+
     // Inform werewolves about each other
     if (werewolves.length > 1) {
       werewolves.forEach((werewolf) => {
@@ -89,7 +94,7 @@ class GameStateManager {
         );
         this.io.to(werewolf.socketId).emit("werewolfTeammates", {
           teammates: otherWerewolves.map((w) => ({
-            name: w.name,
+            username: w.username,
           })),
         });
       });
