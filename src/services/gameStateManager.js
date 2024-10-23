@@ -67,7 +67,6 @@ class GameStateManager {
       await this.players[i].save();
 
       if (this.players[i].role === "werewolf") {
-        console.log(this.players[i]);
         const userId = this.players[i].userId;
         const user = await User.findOne({ _id: userId });
         werewolves.push({
@@ -83,8 +82,6 @@ class GameStateManager {
         description: this.roleDescriptions[this.players[i].role],
       });
     }
-
-    console.log(werewolves);
 
     // Inform werewolves about each other
     if (werewolves.length > 1) {
@@ -234,18 +231,20 @@ class GameStateManager {
   }
 
   async processNightActions() {
-    console.log("PROCESSING NIGHT ACTIONS");
     if (
       this.nightActions.werewolf &&
       this.nightActions.werewolf !== this.nightActions.doctor
     ) {
-      const victim = this.players.find(
-        (p) => p.id === this.nightActions.werewolf
-      );
-      victim.isAlive = false;
-      await victim.save();
-      this.io.to(this.gameId).emit("playerKilled", { playerId: victim.id });
+      const victim = this.players.find(p => p.id === this.nightActions.werewolf);
+      if (victim) {
+        victim.isAlive = false;
+        await victim.save();
+        console.log(`Player ${victim.id} (${victim.role}) has been eliminated`);
+        this.io.to(this.gameId).emit("playerKilled", { playerId: victim.id });
+      }
     }
+    // Reset night actions
+    this.nightActions = {};
   }
 
   async dayPhase() {
@@ -314,25 +313,25 @@ class GameStateManager {
 
     if (eliminated) {
       const player = this.players.find((p) => p.id === eliminated);
-      player.isAlive = false;
-      await player.save();
-      this.io
-        .to(this.gameId)
-        .emit("playerEliminated", { playerId: player.id, role: player.role });
+      if (player) {
+        player.isAlive = false;
+        await player.save();
+        console.log(`Player ${player.id} (${player.role}) has been eliminated by voting`);
+        this.io
+          .to(this.gameId)
+          .emit("playerEliminated", { playerId: player.id, role: player.role });
+      }
     }
+    // Reset votes
+    this.votes = {};
   }
 
   checkGameEnd() {
-    console.log("CHECKING GAME END");
-    const alivePlayers = this.players.filter((p) => p.isAlive && p.isConnected);
-    const aliveWerewolves = alivePlayers.filter(
-      (p) => p.role === "werewolf"
-    ).length;
-    const aliveVillagers = alivePlayers.filter(
-      (p) => p.role !== "werewolf"
-    ).length;
+    const alivePlayers = this.players.filter(p => p.isAlive);
+    const aliveWerewolves = alivePlayers.filter(p => p.role === "werewolf").length;
+    const aliveVillagers = alivePlayers.filter(p => p.role !== "werewolf").length;
 
-    // console.log({ alivePlayers, aliveVillagers, aliveWerewolves });
+    console.log({ alivePlayers: alivePlayers.length, aliveVillagers, aliveWerewolves });
 
     if (aliveWerewolves === 0) {
       return { status: true, winner: "villagers" };
