@@ -98,6 +98,95 @@ The main socket events are:
 - `vote`: Day phase voting
 - `gameEnded`: Signals the end of the game
 
+## Game Events
+
+The Werewolf game emits various events throughout gameplay. Here's a comprehensive list of events with their descriptions:
+
+### Game Setup Events
+
+- `gameCreated`: Emitted when a new game is created.
+  - Payload: `{ gameId: string }`
+
+- `playerJoined`: Emitted when a player joins the game.
+  - Payload: `{ playerId: string, username: string }`
+
+- `gameStarted`: Emitted when the game begins.
+  - Payload: `{ phase: string }`
+
+### Role Assignment Event
+
+- `roleAssigned`: Sent to each player individually with their assigned role.
+  - Payload: `{ role: string, description: string }`
+
+- `werewolfTeammates`: Sent to werewolves to inform them of their teammates.
+  - Payload: `{ teammates: [{ username: string }] }`
+
+### Game Phase Events
+
+- `phaseChange`: Emitted when the game phase changes (e.g., from night to day).
+  - Payload: `{ phase: string }`
+
+- `timerUpdate`: Emitted periodically to update the remaining time in the current phase.
+  - Payload: `{ phase: string, remainingSeconds: number }`
+
+### Night Phase Events
+
+- `werewolfTurn`: Sent to werewolves when it's their turn to choose a victim.
+  - Payload: `{ description: string }`
+
+- `seerTurn`: Sent to the seer when it's their turn to choose a player to investigate.
+  - Payload: `{ description: string }`
+
+- `doctorTurn`: Sent to the doctor when it's their turn to choose a player to protect.
+  - Payload: `{ description: string }`
+
+- `seerResult`: Sent to the seer with the result of their investigation.
+  - Payload: `{ targetId: string, role: string }`
+
+### Day Phase Events
+
+- `playerKilled`: Emitted when a player is killed during the night.
+  - Payload: `{ playerId: string }`
+
+- `playerEliminated`: Emitted when a player is eliminated by voting.
+  - Payload: `{ playerId: string, role: string }`
+
+### Voting Events
+
+- `votingStarted`: Emitted when the voting phase begins.
+  - Payload: `{ remainingTime: number }`
+
+- `voteRegistered`: Emitted when a player's vote is registered.
+  - Payload: `{ voterId: string, targetId: string }`
+
+### Game End Event
+
+- `gameEnded`: Emitted when the game concludes.
+  - Payload: `{ winner: string, reason: string }`
+
+### Player List Update
+
+- `updatePlayerList`: Emitted to update all clients with the current player list.
+  - Payload: `[{ id: string, username: string, isAlive: boolean, role: string | null }]`
+
+### Auto-Resolve Events
+
+- `autoWerewolfAction`: Emitted when werewolf action is auto-resolved.
+  - Payload: `{ targetId: string }`
+
+- `autoSeerResult`: Emitted when seer action is auto-resolved.
+  - Payload: `{ targetId: string, role: string }`
+
+- `autoDoctorAction`: Emitted when doctor action is auto-resolved.
+  - Payload: `{ targetId: string }`
+
+### Error Events
+
+- `gameError`: Emitted when an error occurs during the game.
+  - Payload: `{ message: string }`
+
+Players should listen for these events and update their game state and UI accordingly.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

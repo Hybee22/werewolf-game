@@ -1,7 +1,8 @@
 const Game = require("../models/Game");
 const { shuffle } = require("../helpers/gameHelper");
-const User = require("../models/User");
+// const User = require("../models/User");
 const dotenv = require("dotenv");
+const ProfanityFilter = require("profanity-filter");
 
 dotenv.config();
 
@@ -40,12 +41,67 @@ class GameStateManager {
 
     // Initialize isActive property
     this.isActive = true;
+
+    this.chatFilter = ProfanityFilter;
+    this.lastMessageTime = {};
+    this.messageCooldown = 2000; // 2 seconds cooldown
+
+    // Add these new properties
+    this.phaseStartTime = null;
+    this.phaseDuration = null;
+
+    this.filter = ProfanityFilter;
+    this.isGameStarted = false; // Add this flag
   }
 
   async initialize() {
-    this.game = await Game.findOne({ _id: this.gameId }).populate("players");
+    this.game = await Game.findOne({ _id: this.gameId }).populate({
+      path: "players",
+      populate: {
+        path: "userId",
+        model: "User",
+        select: "username", // Select only the username field from the User model
+      },
+    });
+
     this.players = this.game.players;
     this.currentPhase = this.game.currentPhase || "waiting";
+    this.nightActions = this.game.nightActions || {};
+    this.votes = this.game.votes ? Object.fromEntries(this.game.votes) : {};
+    this.phaseStartTime = this.game.phaseStartTime;
+    this.phaseDuration = this.game.phaseDuration;
+
+    // If game was in progress, resume the current phase
+    if (
+      this.currentPhase !== "waiting" &&
+      this.phaseStartTime &&
+      this.phaseDuration
+    ) {
+      const elapsedTime = Date.now() - this.phaseStartTime.getTime();
+      const remainingTime = Math.max(0, this.phaseDuration - elapsedTime);
+      this.resumeGameLoop(remainingTime);
+    }
+
+    // Broadcast initial player list
+    this.broadcastPlayerList();
+
+    // Send all existing messages to the newly connected player
+    this.io.to(this.gameId).emit("chatHistory", this.game.messages);
+  }
+
+  broadcastPlayerList() {
+    const playerInfo = this.players.map((player) => ({
+      id: player.id,
+      username: player.userId.username, // Use the username from the User model
+      isAlive: player.isAlive,
+      role: this.game.isStarted
+        ? player.isAlive
+          ? "Unknown"
+          : player.role
+        : null,
+    }));
+
+    this.io.to(this.gameId).emit("updatePlayerList", playerInfo);
   }
 
   async startGame() {
@@ -67,10 +123,8 @@ class GameStateManager {
       await this.players[i].save();
 
       if (this.players[i].role === "werewolf") {
-        const userId = this.players[i].userId;
-        const user = await User.findOne({ _id: userId });
         werewolves.push({
-          username: user.username,
+          username: this.players[i].userId.username,
           _id: this.players[i]._id,
           socketId: this.players[i].socketId,
         });
@@ -97,12 +151,16 @@ class GameStateManager {
       });
     }
 
+    // Broadcast updated player list after roles are assigned
+    this.broadcastPlayerList();
+
     this.currentPhase = "night";
     this.game.currentPhase = "night";
-    await this.game.save();
+    await this.saveGameState();
 
     this.io.to(this.gameId).emit("gameStarted", { phase: this.currentPhase });
     this.runGameLoop();
+    this.isGameStarted = true; // Set this flag when the game starts
   }
 
   async runGameLoop() {
@@ -120,6 +178,9 @@ class GameStateManager {
       // Day Phase
       await this.dayPhase();
 
+      // Broadcast updated player list after day phase (which includes voting)
+      this.broadcastPlayerList();
+
       // Check game end after day phase
       const dayEndCheck = this.checkGameEnd();
       if (dayEndCheck.status) {
@@ -129,8 +190,16 @@ class GameStateManager {
     }
   }
 
+  resumeGameLoop(remainingTime) {
+    setTimeout(() => this.runGameLoop(), remainingTime);
+  }
+
   async nightPhase() {
     this.currentPhase = "night";
+    this.phaseStartTime = new Date();
+    this.phaseDuration = this.phaseTimers.night;
+    await this.saveGameState();
+
     this.io.to(this.gameId).emit("phaseChange", { phase: "night" });
     this.nightActions = {};
 
@@ -235,7 +304,9 @@ class GameStateManager {
       this.nightActions.werewolf &&
       this.nightActions.werewolf !== this.nightActions.doctor
     ) {
-      const victim = this.players.find(p => p.id === this.nightActions.werewolf);
+      const victim = this.players.find(
+        (p) => p.id === this.nightActions.werewolf
+      );
       if (victim) {
         victim.isAlive = false;
         await victim.save();
@@ -249,12 +320,21 @@ class GameStateManager {
 
   async dayPhase() {
     this.currentPhase = "day";
+    this.phaseStartTime = new Date();
+    this.phaseDuration = this.phaseTimers.discussion + this.phaseTimers.voting;
+    await this.saveGameState();
+
     this.io.to(this.gameId).emit("phaseChange", { phase: "day" });
 
     await this.startPhaseTimer("discussion", this.phaseTimers.discussion);
 
     this.currentPhase = "voting";
     this.io.to(this.gameId).emit("phaseChange", { phase: "voting" });
+
+    // Emit votingStarted event
+    this.io
+      .to(this.gameId)
+      .emit("votingStarted", { remainingTime: this.phaseTimers.voting });
 
     const votingPromise = this.startPhaseTimer(
       "voting",
@@ -316,7 +396,9 @@ class GameStateManager {
       if (player) {
         player.isAlive = false;
         await player.save();
-        console.log(`Player ${player.id} (${player.role}) has been eliminated by voting`);
+        console.log(
+          `Player ${player.id} (${player.role}) has been eliminated by voting`
+        );
         this.io
           .to(this.gameId)
           .emit("playerEliminated", { playerId: player.id, role: player.role });
@@ -324,14 +406,19 @@ class GameStateManager {
     }
     // Reset votes
     this.votes = {};
+
+    // Broadcast updated player list after voting
+    this.broadcastPlayerList();
   }
 
   checkGameEnd() {
-    const alivePlayers = this.players.filter(p => p.isAlive);
-    const aliveWerewolves = alivePlayers.filter(p => p.role === "werewolf").length;
-    const aliveVillagers = alivePlayers.filter(p => p.role !== "werewolf").length;
-
-    console.log({ alivePlayers: alivePlayers.length, aliveVillagers, aliveWerewolves });
+    const alivePlayers = this.players.filter((p) => p.isAlive);
+    const aliveWerewolves = alivePlayers.filter(
+      (p) => p.role === "werewolf"
+    ).length;
+    const aliveVillagers = alivePlayers.filter(
+      (p) => p.role !== "werewolf"
+    ).length;
 
     if (aliveWerewolves === 0) {
       return { status: true, winner: "villagers" };
@@ -365,6 +452,8 @@ class GameStateManager {
     this.game.isEnded = true;
     this.game.winner = winner;
     this.game.endedAt = new Date();
+    // Clear all messages
+    this.game.messages = [];
     await this.game.save();
 
     // Remove all socket listeners for this game
@@ -400,18 +489,23 @@ class GameStateManager {
 
     // Mark this instance as inactive
     this.isActive = false;
+
+    // Clear all messages
+    this.game.messages = [];
+    await this.game.save();
   }
 
-  handleWerewolfAction(playerId, targetId) {
+  async handleWerewolfAction(playerId, targetId) {
     if (
       this.currentPhase === "night" &&
       this.players.find((p) => p.id === playerId && p.role === "werewolf")
     ) {
       this.nightActions.werewolf = targetId;
     }
+    await this.saveGameState();
   }
 
-  handleSeerAction(playerId, targetId) {
+  async handleSeerAction(playerId, targetId) {
     if (
       this.currentPhase === "night" &&
       this.players.find((p) => p.id === playerId && p.role === "seer")
@@ -419,21 +513,28 @@ class GameStateManager {
       const targetRole = this.players.find((p) => p.id === targetId).role;
       this.io.to(playerId).emit("seerResult", { targetId, role: targetRole });
     }
+    await this.saveGameState();
   }
 
-  handleDoctorAction(playerId, targetId) {
+  async handleDoctorAction(playerId, targetId) {
     if (
       this.currentPhase === "night" &&
       this.players.find((p) => p.id === playerId && p.role === "doctor")
     ) {
       this.nightActions.doctor = targetId;
     }
+    await this.saveGameState();
   }
 
-  handleVote(playerId, targetId) {
-    if (this.currentPhase === "day") {
+  async handleVote(playerId, targetId) {
+    if (this.currentPhase === "voting") {
       this.votes[playerId] = targetId;
+      // Emit voteRegistered event
+      this.io
+        .to(this.gameId)
+        .emit("voteRegistered", { voterId: playerId, targetId: targetId });
     }
+    await this.saveGameState();
   }
 
   handlePlayerDisconnect(player) {
@@ -472,6 +573,9 @@ class GameStateManager {
       if (gameEndResult) {
         this.endGame(gameEndResult);
       }
+
+      // Broadcast updated player list after disconnection
+      this.broadcastPlayerList();
     }
   }
 
@@ -596,6 +700,98 @@ class GameStateManager {
     this.phaseTimeout = null;
     this.currentTimer = null;
     this.timerInterval = null;
+  }
+
+  async handleChatMessage(io, {
+    gameId,
+    playerId,
+    message,
+    isWhisper = false,
+    targetId = null,
+  }) {
+    if (!this.io) this.io = io;
+    if (!this.gameId) this.gameId = gameId;
+    if (!this.players.length) {
+      this.game = await Game.findOne({ _id: gameId }).populate({
+        path: "players",
+        populate: {
+          path: "userId",
+          model: "User",
+          select: "username",
+        },
+      });
+
+      this.players = this.game.players;
+    }
+    const player = this.players.find((p) => p.id === playerId);
+    if (!player) return; // Player not found
+
+
+    // Check if the player is allowed to chat
+    if (this.isGameStarted && !player.isAlive) return; // Dead players can't chat once the game has started
+
+    // Check for rate limiting
+    const now = Date.now();
+    if (now - (this.lastMessageTime[playerId] || 0) < this.messageCooldown) {
+      this.io
+        .to(player.socketId)
+        .emit("error", "Please wait before sending another message.");
+      return;
+    }
+    this.lastMessageTime[playerId] = now;
+
+    // Filter message
+    const filteredMessage = this.filter.clean(message);
+
+    const chatMessage = {
+      playerId: player.id,
+      username: player.userId.username,
+      message: filteredMessage,
+      timestamp: new Date(),
+      isWhisper: isWhisper,
+      whisperTarget: isWhisper ? targetId : null
+    };
+
+    // Save the message to the database
+    this.game = await Game.findOne({ _id: gameId })
+    this.game.messages.push(chatMessage);
+    await this.game.save();
+
+    if (isWhisper && targetId) {
+      // Handle whisper logic
+      const targetPlayer = this.players.find((p) => p.id === targetId);
+      if (targetPlayer && (targetPlayer.isAlive || !this.isGameStarted)) {
+        this.io.to(player.socketId).emit("chatMessage", chatMessage);
+        this.io.to(targetPlayer.socketId).emit("chatMessage", chatMessage);
+      } else {
+        this.io.to(player.socketId).emit("error", "Invalid whisper target.");
+      }
+    } else {
+      // Handle public chat
+      if (!this.isGameStarted) {
+        // Before game starts, all players can chat
+        this.io.to(this.gameId).emit("chatMessage", chatMessage);
+      } else if (this.currentPhase === "night" && player.role === "werewolf") {
+        // During night, only werewolves can chat among themselves
+        this.players
+          .filter((p) => p.role === "werewolf" && p.isAlive)
+          .forEach((werewolf) => {
+            this.io.to(werewolf.socketId).emit("chatMessage", chatMessage);
+          });
+      } else if (this.currentPhase !== "night") {
+        // During day, all alive players can chat
+        this.io.to(this.gameId).emit("chatMessage", chatMessage);
+      }
+    }
+  }
+
+  async saveGameState() {
+    this.game.currentPhase = this.currentPhase;
+    this.game.nightActions = this.nightActions;
+    this.game.votes = new Map(Object.entries(this.votes));
+    this.game.phaseStartTime = this.phaseStartTime;
+    this.game.phaseDuration = this.phaseDuration;
+    await this.game.save();
   }
 }
 

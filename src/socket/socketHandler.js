@@ -1,3 +1,5 @@
+const Game = require("../models/Game");
+const User = require("../models/User");
 const gameService = require("../services/gameService");
 const GameStateManager = require("../services/gameStateManager");
 
@@ -9,15 +11,21 @@ module.exports = (io) => {
 
     socket.on("joinGame", async ({ gameId, userId }) => {
       try {
-        await gameService.joinGame(gameId, userId);
-        socket.join(gameId);
-        await gameService.updatePlayerSocket(gameId, userId, socket.id);
-        io.to(gameId).emit("playerJoined", { userId });
-
         // Get or create game manager
-        // let gameManager = await gameService.getGameManager(gameId, io);
+        let gameManager = await gameService.getGameManager(gameId, io);
 
-        console.log(`Player ${userId} joined game ${gameId}`);
+        if (gameManager) {
+          const player = await gameService.joinGame(gameId, userId);
+          socket.join(gameId);
+          await gameService.updatePlayerSocket(gameId, userId, socket.id);
+          io.to(gameId).emit("playerJoined", { playerId: player._id });
+          // Emit chat history to the newly joined player
+          const game = await Game.findOne({ _id: gameId });
+          socket.emit("chatHistory", game.messages);
+        }
+
+        const user = await User.findOne({ _id: userId }).select("username");
+        console.log(`Player ${user.username} joined game ${gameId}`);
       } catch (error) {
         console.log(`Error joining game: ${error.message}`);
         socket.emit("error", error.message);
@@ -34,7 +42,7 @@ module.exports = (io) => {
           throw new Error("Game not found");
         }
       } catch (error) {
-        console.log(error)
+        console.log(error);
         console.log(`Error starting game: ${error.message}`);
         socket.emit("error", error.message);
       }
@@ -87,6 +95,30 @@ module.exports = (io) => {
         console.log(`Vote failed: Game ${gameId} not found`);
       }
     });
+
+    socket.on(
+      "sendMessage",
+      async ({ gameId, playerId, message, isWhisper, targetId }) => {
+        try {
+          const gameManager = await gameService.getGameManager(gameId, io);
+          if (gameManager) {
+            await gameStateManager.handleChatMessage(io, {
+              gameId,
+              playerId,
+              message,
+              isWhisper,
+              targetId,
+            });
+          } else {
+            console.log(`Chat message failed: Game ${gameId} not found`);
+            socket.emit("error", "Game not found");
+          }
+        } catch (error) {
+          console.log(`Error sending chat message: ${error.message}`);
+          socket.emit("error", error.message);
+        }
+      }
+    );
 
     socket.on("disconnect", () => {
       console.log("Client disconnected");

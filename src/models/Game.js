@@ -8,7 +8,23 @@ const gameSchema = new mongoose.Schema({
   roles: [String],
   isEnded: { type: Boolean, default: false },
   winner: { type: String, enum: ['villagers', 'werewolves', 'draw'] },
-  endedAt: { type: Date }
+  endedAt: { type: Date },
+  nightActions: {
+    werewolf: String,
+    doctor: String,
+    seer: String
+  },
+  votes: { type: Map, of: String },
+  phaseStartTime: Date,
+  phaseDuration: Number,
+  messages: [{
+    playerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
+    username: String,
+    message: String,
+    timestamp: Date,
+    isWhisper: Boolean,
+    whisperTarget: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' }
+  }]
 });
 
 module.exports = mongoose.model('Game', gameSchema);

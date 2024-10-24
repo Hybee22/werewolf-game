@@ -16,15 +16,29 @@ exports.createGame = async () => {
 
 exports.joinGame = async (gameId, userId) => {
   const game = await Game.findOne({ _id: gameId });
-  if (!game || game.isStarted) {
-    throw new Error("Game not found or already started");
+  if (!game) {
+    throw new Error("Game not found");
   }
 
-  const player = new Player({ userId, gameId: game._id });
-  await player.save();
+  if (game.isStarted) {
+    throw new Error("Game has already started");
+  }
 
-  game.players.push(player._id);
+  // Check if the player is already in the game
+  const existingPlayer = await Player.findOne({ userId, gameId: game._id });
+  if (existingPlayer) {
+    return existingPlayer; // Return the existing player record
+  }
+
+  // If the player is not in the game, create a new player
+  const newPlayer = new Player({ userId, gameId: game._id });
+  const savedPlayer = await newPlayer.save();
+
+  // Add the new player to the game
+  game.players.push(savedPlayer._id);
   await game.save();
+
+  return savedPlayer;
 };
 
 exports.startGame = async (gameId, io) => {
@@ -41,14 +55,11 @@ exports.startGame = async (gameId, io) => {
 };
 
 exports.getGameManager = async (gameId, io) => {
-  const game = await Game.findOne({ _id: gameId });
-
-  if (game) {
+  if (!gameManagers.has(gameId)) {
     const gameManager = new GameStateManager(gameId, io);
+    await gameManager.initialize();
     gameManagers.set(gameId, gameManager);
-    return gameManagers.get(gameId);
   }
-
   return gameManagers.get(gameId);
 };
 
