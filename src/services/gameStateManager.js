@@ -702,13 +702,10 @@ class GameStateManager {
     this.timerInterval = null;
   }
 
-  async handleChatMessage(io, {
-    gameId,
-    playerId,
-    message,
-    isWhisper = false,
-    targetId = null,
-  }) {
+  async handleChatMessage(
+    io,
+    { gameId, playerId, message, isWhisper = false, targetId = null }
+  ) {
     if (!this.io) this.io = io;
     if (!this.gameId) this.gameId = gameId;
     if (!this.players.length) {
@@ -725,7 +722,6 @@ class GameStateManager {
     }
     const player = this.players.find((p) => p.id === playerId);
     if (!player) return; // Player not found
-
 
     // Check if the player is allowed to chat
     if (this.isGameStarted && !player.isAlive) return; // Dead players can't chat once the game has started
@@ -749,12 +745,12 @@ class GameStateManager {
       message: filteredMessage,
       timestamp: new Date(),
       isWhisper: isWhisper,
-      whisperTarget: isWhisper ? targetId : null
+      whisperTarget: isWhisper ? targetId : null,
     };
 
     // Save the message to the database
-    this.game = await Game.findOne({ _id: gameId })
-    this.game.messages.push(chatMessage);
+    this.game = await Game.findOne({ _id: gameId });
+    if (!isWhisper) this.game.messages.push(chatMessage);
     await this.game.save();
 
     if (isWhisper && targetId) {

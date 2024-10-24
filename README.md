@@ -180,12 +180,20 @@ The Werewolf game emits various events throughout gameplay. Here's a comprehensi
 - `autoDoctorAction`: Emitted when doctor action is auto-resolved.
   - Payload: `{ targetId: string }`
 
+### Chat Events
+
+- `chatHistory`: Emitted when a player joins the game, containing all previous messages.
+  - Payload: `[{ playerId: string, username: string, message: string, timestamp: Date, isWhisper: boolean, whisperTarget: string | null }]`
+
+- `chatMessage`: Emitted when a new chat message is sent.
+  - Payload: `{ playerId: string, username: string, message: string, timestamp: Date, isWhisper: boolean, whisperTarget: string | null }`
+
 ### Error Events
 
-- `gameError`: Emitted when an error occurs during the game.
+- `error`: Emitted when an error occurs during the game.
   - Payload: `{ message: string }`
 
-Players should listen for these events and update their game state and UI accordingly.
+Players should listen for these events and update their game state and UI accordingly. The chat events allow for persistent messaging during the game, with the entire chat history provided upon joining and individual messages sent in real-time as they occur.
 
 ## Contributing
 
