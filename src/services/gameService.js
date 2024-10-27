@@ -1,16 +1,62 @@
+const dotenv = require("dotenv");
 const Game = require("../models/Game");
 const Player = require("../models/Player");
-const User = require("../models/User");
 const { generateGameId } = require("../helpers/gameHelper");
 const GameStateManager = require("./gameStateManager");
+const { assignRoles } = require("./roleAssignment");
+
+dotenv.config();
 
 let gameManagers = new Map();
 
-exports.createGame = async () => {
+exports.createGame = async ({
+  options = {
+    noLynch: true,
+    timer: { night: 30000, discussion: 120000, voting: 30000 },
+    autoResolveActions: false,
+    aiPlayerCount: 5,
+  },
+}) => {
   const gameId = generateGameId();
-  const game = new Game({ id: gameId, isStarted: false });
-  await game.save();
+  const game = new Game({
+    id: gameId,
+    noLynchOption: options.noLynch,
+    timers: {
+      night: options.timer.night || process.env.NIGHT_PHASE_TIME,
+      discussion: options.timer.discussion || process.env.DISCUSSION_PHASE_TIME,
+      voting: options.timer.voting || process.env.VOTING_PHASE_TIME,
+    },
+    autoResolve: options.autoResolveActions,
+    roleCount: options.roleCount || {
+      werewolf: 2,
+      villager: 10,
+      seer: 1,
+      doctor: 1,
+      bodyguard: 1,
+      witch: 1,
+      hunter: 1,
+    },
+  });
 
+  // Create AI players
+  for (let i = 0; i < options.aiPlayerCount; i++) {
+    const aiPlayer = new Player({
+      userId: `AI_${i}`,
+      username: `AI_${i}`,
+      isAI: true,
+      isAlive: true,
+      isConnected: true,
+    });
+    game.players.push(aiPlayer);
+  }
+
+  // Assign roles to all players (human and AI)
+  const assignedRoles = assignRoles(game.players.length, game.roleCount);
+  game.players.forEach((player, index) => {
+    player.role = assignedRoles[index];
+  });
+
+  await game.save();
   return game;
 };
 

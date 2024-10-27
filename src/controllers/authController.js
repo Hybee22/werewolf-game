@@ -16,7 +16,13 @@ exports.login = async (req, res, next) => {
     const { username, password } = req.body;
     const user = await authService.loginUser(username, password);
     req.session.userId = user._id;
-    res.json({ message: "Logged in successfully", playerId: user._id });
+    res.json({
+      message: "Logged in successfully",
+      data: {
+        playerId: user._id,
+        username: user.username,
+      },
+    });
   } catch (error) {
     next(error);
   }

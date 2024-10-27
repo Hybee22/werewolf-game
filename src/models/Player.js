@@ -6,7 +6,8 @@ const playerSchema = new mongoose.Schema({
   role: String,
   socketId: String,
   isConnected: { type: Boolean, default: true },
-  isAlive: { type: Boolean, default: true }
+  isAlive: { type: Boolean, default: true },
+  isAI: { type: Boolean, default: false },
 });
 
 module.exports = mongoose.model('Player', playerSchema);

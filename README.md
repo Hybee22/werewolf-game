@@ -193,6 +193,17 @@ The Werewolf game emits various events throughout gameplay. Here's a comprehensi
 - `error`: Emitted when an error occurs during the game.
   - Payload: `{ message: string }`
 
+### Spectator Events
+
+- `joinedAsSpectator`: Emitted when a user successfully joins a game as a spectator.
+  - Payload: `{ gameId: string }`
+
+- `leftAsSpectator`: Emitted when a user leaves a game they were spectating.
+  - Payload: `{ gameId: string }`
+
+- `gameState`: Emitted to update spectators (and players) with the current game state.
+  - Payload: `{ players: Array, currentPhase: string, ... }`
+
 Players should listen for these events and update their game state and UI accordingly. The chat events allow for persistent messaging during the game, with the entire chat history provided upon joining and individual messages sent in real-time as they occur.
 
 ## Contributing
