@@ -1,8 +1,9 @@
 const Game = require("../models/Game");
 const { shuffle } = require("../helpers/gameHelper");
-// const User = require("../models/User");
 const dotenv = require("dotenv");
 const ProfanityFilter = require("profanity-filter");
+const AIPlayer = require("./AIPlayer");
+const User = require("../models/User");
 
 dotenv.config();
 
@@ -17,12 +18,14 @@ class GameStateManager {
     this.nightActions = {};
     this.votes = {};
 
-    // Add these new properties
+    // Set default timers that will be updated in initialize()
     this.phaseTimers = {
-      night: parseInt(process.env.NIGHT_PHASE_TIME) ?? 30000, // 45 seconds for night phase
-      discussion: parseInt(process.env.DISCUSSION_PHASE_TIME) ?? 120000, // 2 minutes for discussion
-      voting: parseInt(process.env.VOTING_PHASE_TIME) ?? 30000, // 45 seconds for voting
+      night: 30000,      // Default 30 seconds
+      discussion: 120000, // Default 2 minutes
+      voting: 30000      // Default 30 seconds
     };
+
+    // Add these new properties
     this.currentTimer = null;
     this.timerInterval = null;
 
@@ -35,6 +38,12 @@ class GameStateManager {
       seer: "You are the Seer. Each night, you can choose one player to learn their true role. Use this information to help the villagers.",
       doctor:
         "You are the Doctor. Each night, choose a player to protect. If the werewolves target that player, they will survive.",
+      bodyguard:
+        "You are the Bodyguard. Each night, choose a player to protect from elimination.",
+      witch:
+        "You are the Witch. You have two potions - one to save a player, one to eliminate a player.",
+      hunter:
+        "You are the Hunter. If eliminated, you can choose to eliminate another player.",
     };
 
     this.listeners = {};
@@ -52,6 +61,16 @@ class GameStateManager {
 
     this.filter = ProfanityFilter;
     this.isGameStarted = false; // Add this flag
+
+    this.nightActionOrder = [
+      "werewolf",
+      "bodyguard",
+      "doctor",
+      "witch",
+      "seer",
+    ];
+
+    this.aiPlayers = new Map();
   }
 
   async initialize() {
@@ -60,9 +79,20 @@ class GameStateManager {
       populate: {
         path: "userId",
         model: "User",
-        select: "username", // Select only the username field from the User model
+        select: "username",
       },
     });
+
+    if (!this.game) {
+      throw new Error('Game not found');
+    }
+
+    // Initialize phase timers with game settings or defaults
+    this.phaseTimers = {
+      night: this.game.timers?.night || 30000,      // 30 seconds default
+      discussion: this.game.timers?.discussion || 120000, // 2 minutes default
+      voting: this.game.timers?.voting || 30000     // 30 seconds default
+    };
 
     this.players = this.game.players;
     this.currentPhase = this.game.currentPhase || "waiting";
@@ -72,15 +102,18 @@ class GameStateManager {
     this.phaseDuration = this.game.phaseDuration;
 
     // If game was in progress, resume the current phase
-    if (
-      this.currentPhase !== "waiting" &&
-      this.phaseStartTime &&
-      this.phaseDuration
-    ) {
+    if (this.currentPhase !== "waiting" && this.phaseStartTime && this.phaseDuration) {
       const elapsedTime = Date.now() - this.phaseStartTime.getTime();
       const remainingTime = Math.max(0, this.phaseDuration - elapsedTime);
       this.resumeGameLoop(remainingTime);
     }
+
+    // Initialize AI players if they exist
+    this.players.forEach(player => {
+      if (player.isAI) {
+        this.aiPlayers.set(player.id, new AIPlayer(player.id, player.role));
+      }
+    });
 
     // Broadcast initial player list
     this.broadcastPlayerList();
@@ -92,8 +125,9 @@ class GameStateManager {
   broadcastPlayerList() {
     const playerInfo = this.players.map((player) => ({
       id: player.id,
-      username: player.userId.username, // Use the username from the User model
+      username: player.isAI ? player.username : player.userId.username, // Handle AI players differently
       isAlive: player.isAlive,
+      isAI: player.isAI, // Add this to differentiate AI players in the UI
       role: this.game.isStarted
         ? player.isAlive
           ? "Unknown"
@@ -106,48 +140,61 @@ class GameStateManager {
 
   async startGame() {
     this.game.isStarted = true;
-    this.game.roles = shuffle([
-      "werewolf",
-      "werewolf",
-      "seer",
-      "doctor",
-      "villager",
-      "villager",
-      "villager",
-    ]);
+    const roles = [];
+    Object.entries(this.game.roleCount).forEach(([role, count]) => {
+      for (let i = 0; i < count; i++) {
+        roles.push(role);
+      }
+    });
+    this.game.roles = shuffle(roles);
 
     const werewolves = [];
 
     for (let i = 0; i < this.players.length; i++) {
-      this.players[i].role = this.game.roles[i];
-      await this.players[i].save();
+      const player = this.players[i];
+      player.role = this.game.roles[i];
+      await player.save();
 
-      if (this.players[i].role === "werewolf") {
+      if (player.role === "werewolf") {
         werewolves.push({
-          username: this.players[i].userId.username,
-          _id: this.players[i]._id,
-          socketId: this.players[i].socketId,
+          username: player.isAI ? player.username : player.userId.username,
+          _id: player._id,
+          socketId: player.socketId,
+          isAI: player.isAI,
         });
       }
 
-      // Inform each player of their role and its description
-      this.io.to(this.players[i].socketId).emit("roleAssigned", {
-        role: this.players[i].role,
-        description: this.roleDescriptions[this.players[i].role],
-      });
+      // Only send role assignments to human players
+      if (!player.isAI) {
+        this.io.to(player.socketId).emit("roleAssigned", {
+          role: player.role,
+          description: this.roleDescriptions[player.role],
+        });
+      }
     }
 
-    // Inform werewolves about each other
+    // Initialize AI players
+    this.players.forEach((player) => {
+      if (player.isAI) {
+        this.aiPlayers.set(player.id, new AIPlayer(player.id, player.role));
+      }
+    });
+
+    // Inform human werewolves about all werewolf teammates (both human and AI)
     if (werewolves.length > 1) {
       werewolves.forEach((werewolf) => {
-        const otherWerewolves = werewolves.filter(
-          (w) => w._id !== werewolf._id
-        );
-        this.io.to(werewolf.socketId).emit("werewolfTeammates", {
-          teammates: otherWerewolves.map((w) => ({
-            username: w.username,
-          })),
-        });
+        // Only send to human werewolves
+        if (!werewolf.isAI) {
+          const otherWerewolves = werewolves.filter(
+            (w) => w._id !== werewolf._id
+          );
+          this.io.to(werewolf.socketId).emit("werewolfTeammates", {
+            teammates: otherWerewolves.map((w) => ({
+              username: w.username,
+              isAI: w.isAI,
+            })),
+          });
+        }
       });
     }
 
@@ -160,7 +207,10 @@ class GameStateManager {
 
     this.io.to(this.gameId).emit("gameStarted", { phase: this.currentPhase });
     this.runGameLoop();
-    this.isGameStarted = true; // Set this flag when the game starts
+    this.isGameStarted = true;
+
+    // Broadcast initial game state
+    this.broadcastGameState();
   }
 
   async runGameLoop() {
@@ -195,36 +245,56 @@ class GameStateManager {
   }
 
   async nightPhase() {
+    console.log("NIGHT PHASE STARTED");
     this.currentPhase = "night";
-    this.phaseStartTime = new Date();
-    this.phaseDuration = this.phaseTimers.night;
-    await this.saveGameState();
-
     this.io.to(this.gameId).emit("phaseChange", { phase: "night" });
     this.nightActions = {};
+
+    await this.saveGameState();
 
     const nightPhasePromise = this.startPhaseTimer(
       "night",
       this.phaseTimers.night
     );
 
+    console.log("NIGHT TIMER", this.phaseTimers.night);
+    console.log("AUTO RESOLVE", this.game.autoResolve);
+
+    console.log("WEREWOLF", this.nightActions.werewolf);
+    console.log("BODYGUARD", this.nightActions.bodyguard);
+    console.log("DOCTOR", this.nightActions.doctor);
+    console.log("WITCH", this.nightActions.witch);
+    console.log("SEER", this.nightActions.seer);
+
     await Promise.race([this.sequentialNightActions(), nightPhasePromise]);
 
     // Ensure auto-resolve actions run if the timer expires
-    if (!this.nightActions.werewolf) this.autoResolveWerewolfAction();
-    if (!this.nightActions.seer) this.autoResolveSeerAction();
-    if (this.nightActions.doctor === undefined) this.autoResolveDoctorAction();
+
+    // Auto-resolve any actions that weren't taken
+    if (this.game.autoResolve) {
+      if (!this.nightActions.werewolf) this.autoResolveWerewolfAction();
+      if (!this.nightActions.bodyguard) this.autoResolveBodyguardAction();
+      if (!this.nightActions.doctor) this.autoResolveDoctorAction();
+      if (!this.nightActions.witch) this.autoResolveWitchAction();
+      if (!this.nightActions.seer) this.autoResolveSeerAction();
+    }
 
     await this.processNightActions();
+
+    await this.handleAIActions("night");
+    console.log("NIGHT PHASE ENDED");
   }
 
   async sequentialNightActions() {
     await this.waitForWerewolfActions();
-    await this.waitForSeerAction();
+    await this.waitForBodyguardAction();
     await this.waitForDoctorAction();
+    await this.waitForWitchAction();
+    await this.waitForSeerAction();
   }
 
   async waitForWerewolfActions() {
+    console.log("WAITING FOR WEREWOLF ACTIONS");
     const werewolves = this.players.filter(
       (p) => p.role === "werewolf" && p.isAlive
     );
@@ -251,6 +321,28 @@ class GameStateManager {
       this.listeners.werewolfAction = werewolfActionHandler;
       this.io.on("werewolfAction", werewolfActionHandler);
     });
+  }
+
+  async waitForBodyguardAction() {
+    const bodyguard = this.players.find(
+      (p) => p.role === "bodyguard" && p.isAlive
+    );
+    if (bodyguard) {
+      this.io.to(bodyguard.socketId).emit("bodyguardTurn");
+      await this.handleBodyguardAction();
+    }
+  }
+
+  async waitForWitchAction() {
+    const witch = this.players.find((p) => p.role === "witch" && p.isAlive);
+    if (witch) {
+      this.io.to(witch.socketId).emit("witchTurn", {
+        werewolfTarget: this.nightActions.werewolf,
+        canHeal: witch.potions.heal,
+        canKill: witch.potions.kill,
+      });
+      await this.handleWitchAction();
+    }
   }
 
   async waitForSeerAction() {
@@ -300,34 +392,89 @@ class GameStateManager {
   }
 
   async processNightActions() {
-    if (
-      this.nightActions.werewolf &&
-      this.nightActions.werewolf !== this.nightActions.doctor
-    ) {
-      const victim = this.players.find(
-        (p) => p.id === this.nightActions.werewolf
-      );
-      if (victim) {
-        victim.isAlive = false;
-        await victim.save();
-        console.log(`Player ${victim.id} (${victim.role}) has been eliminated`);
-        this.io.to(this.gameId).emit("playerKilled", { playerId: victim.id });
+    console.log("PROCESSING NIGHT ACTIONS");
+    let eliminatedPlayerId = null;
+
+    // Process Werewolf action
+    if (this.nightActions.werewolf) {
+      eliminatedPlayerId = this.nightActions.werewolf;
+    }
+
+    // Process Bodyguard action
+    if (this.nightActions.bodyguard === eliminatedPlayerId) {
+      eliminatedPlayerId = null; // Bodyguard protected the target
+      console.log(`Bodyguard protected player ${this.nightActions.bodyguard}`);
+    }
+
+    // Process Doctor action
+    if (this.nightActions.doctor === eliminatedPlayerId) {
+      eliminatedPlayerId = null; // Doctor saved the target
+      console.log(`Doctor saved player ${this.nightActions.doctor}`);
+    }
+
+    // Process Witch action
+    if (this.nightActions.witch) {
+      if (
+        this.nightActions.witch.action === "heal" &&
+        this.nightActions.witch.targetId === eliminatedPlayerId
+      ) {
+        eliminatedPlayerId = null; // Witch saved the target
+        console.log(`Witch saved player ${this.nightActions.witch.targetId}`);
+      } else if (this.nightActions.witch.action === "kill") {
+        if (!eliminatedPlayerId) {
+          eliminatedPlayerId = this.nightActions.witch.targetId;
+        } else {
+          // If Werewolf already killed someone, Witch kills a second person
+          await this.eliminatePlayer(this.nightActions.witch.targetId, "witch");
+          console.log(
+            `Witch eliminated player ${this.nightActions.witch.targetId}`
+          );
+        }
       }
     }
+
+    // Eliminate the final target, if any
+    if (eliminatedPlayerId) {
+      await this.eliminatePlayer(eliminatedPlayerId, "werewolf");
+      console.log(`Werewolf eliminated player ${eliminatedPlayerId}`);
+    }
+
+    // Process Seer action (doesn't affect eliminations)
+    if (this.nightActions.seer) {
+      const targetPlayer = this.players.find(
+        (p) => p.id === this.nightActions.seer
+      );
+      if (targetPlayer) {
+        const seer = this.players.find((p) => p.role === "seer" && p.isAlive);
+        if (seer && !seer.isAI) {
+          // Only send to human seers
+          this.io.to(seer.socketId).emit("seerResult", {
+            targetId: targetPlayer.id,
+            role: targetPlayer.role,
+          });
+        }
+        console.log(`Seer investigated player ${targetPlayer.id}`);
+      }
+    }
+
     // Reset night actions
     this.nightActions = {};
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   async dayPhase() {
+    console.log("DAY PHASE STARTED");
     this.currentPhase = "day";
-    this.phaseStartTime = new Date();
-    this.phaseDuration = this.phaseTimers.discussion + this.phaseTimers.voting;
-    await this.saveGameState();
-
     this.io.to(this.gameId).emit("phaseChange", { phase: "day" });
-
+    await this.saveGameState();
+    // Day discussion Phase
+    this.io
+      .to(this.gameId)
+      .emit("discussionStarted", { duration: this.phaseTimers.discussion });
     await this.startPhaseTimer("discussion", this.phaseTimers.discussion);
-
+    // Voting Phase
     this.currentPhase = "voting";
     this.io.to(this.gameId).emit("phaseChange", { phase: "voting" });
 
@@ -336,22 +483,26 @@ class GameStateManager {
       .to(this.gameId)
       .emit("votingStarted", { remainingTime: this.phaseTimers.voting });
 
-    const votingPromise = this.startPhaseTimer(
+    const votingTimerPromise = this.startPhaseTimer(
       "voting",
       this.phaseTimers.voting
     );
 
-    await Promise.race([this.waitForAllVotes(), votingPromise]);
+    await Promise.race([this.waitForAllVotes(), votingTimerPromise]);
 
     // Ensure auto-resolve voting if timer expires
-    if (
-      Object.keys(this.votes).length <
-      this.players.filter((p) => p.isAlive).length
-    ) {
-      this.autoResolveVoting();
+    if (this.game.autoResolve) {
+      if (
+        Object.keys(this.votes).length <
+        this.players.filter((p) => p.isAlive).length
+      ) {
+        this.autoResolveVoting();
+      }
     }
 
     await this.processVotes();
+
+    await this.handleAIActions("day");
   }
 
   startPhaseTimer(phase, duration) {
@@ -386,12 +537,28 @@ class GameStateManager {
       voteCounts[targetId] = (voteCounts[targetId] || 0) + 1;
     });
 
+    // Add "no lynch" option to vote counts if enabled
+    if (this.game.noLynchOption) {
+      voteCounts["noLynch"] = voteCounts["noLynch"] || 0;
+    }
+
     const maxVotes = Math.max(...Object.values(voteCounts));
-    const eliminated = Object.keys(voteCounts).find(
+    const eliminatedCandidates = Object.keys(voteCounts).filter(
       (id) => voteCounts[id] === maxVotes
     );
 
-    if (eliminated) {
+    let eliminated = null;
+    if (eliminatedCandidates.length === 1) {
+      eliminated = eliminatedCandidates[0];
+    } else {
+      // Tie-breaker: random selection among tied candidates
+      eliminated =
+        eliminatedCandidates[
+          Math.floor(Math.random() * eliminatedCandidates.length)
+        ];
+    }
+
+    if (eliminated && eliminated !== "noLynch") {
       const player = this.players.find((p) => p.id === eliminated);
       if (player) {
         player.isAlive = false;
@@ -403,12 +570,23 @@ class GameStateManager {
           .to(this.gameId)
           .emit("playerEliminated", { playerId: player.id, role: player.role });
       }
+    } else if (eliminated === "noLynch") {
+      console.log("Village decided not to lynch anyone");
+      this.io.to(this.gameId).emit("noLynch");
+    } else {
+      this.io
+        .to(this.gameId)
+        .emit("noElimination", { reason: "No majority vote" });
     }
+
     // Reset votes
     this.votes = {};
 
     // Broadcast updated player list after voting
     this.broadcastPlayerList();
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   checkGameEnd() {
@@ -452,9 +630,6 @@ class GameStateManager {
     this.game.isEnded = true;
     this.game.winner = winner;
     this.game.endedAt = new Date();
-    // Clear all messages
-    this.game.messages = [];
-    await this.game.save();
 
     // Remove all socket listeners for this game
     if (this.listeners.werewolfAction) {
@@ -492,7 +667,13 @@ class GameStateManager {
 
     // Clear all messages
     this.game.messages = [];
+
     await this.game.save();
+
+    this.io.to(this.gameId).emit("gameEnded", { winner, reason: "Game Over" });
+
+    // Broadcast final game state
+    this.broadcastGameState();
   }
 
   async handleWerewolfAction(playerId, targetId) {
@@ -503,6 +684,13 @@ class GameStateManager {
       this.nightActions.werewolf = targetId;
     }
     await this.saveGameState();
+
+    this.io
+      .to(playerId)
+      .emit("actionConfirmation", { role: "werewolf", targetId });
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   async handleSeerAction(playerId, targetId) {
@@ -514,6 +702,9 @@ class GameStateManager {
       this.io.to(playerId).emit("seerResult", { targetId, role: targetRole });
     }
     await this.saveGameState();
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   async handleDoctorAction(playerId, targetId) {
@@ -524,6 +715,13 @@ class GameStateManager {
       this.nightActions.doctor = targetId;
     }
     await this.saveGameState();
+
+    this.io
+      .to(playerId)
+      .emit("actionConfirmation", { role: "doctor", targetId });
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   async handleVote(playerId, targetId) {
@@ -532,9 +730,12 @@ class GameStateManager {
       // Emit voteRegistered event
       this.io
         .to(this.gameId)
-        .emit("voteRegistered", { voterId: playerId, targetId: targetId });
+        .emit("voteRegistered", { voterId: playerId, targetId });
     }
     await this.saveGameState();
+
+    // Broadcast updated game state
+    this.broadcastGameState();
   }
 
   handlePlayerDisconnect(player) {
@@ -544,21 +745,33 @@ class GameStateManager {
 
       // If it's the disconnected player's turn, skip it
       if (this.currentPhase === "night") {
-        if (
-          disconnectedPlayer.role === "werewolf" &&
-          this.nightActions.werewolf === undefined
-        ) {
-          this.nightActions.werewolf = null;
-        } else if (
-          disconnectedPlayer.role === "seer" &&
-          !this.nightActions.seer
-        ) {
-          this.nightActions.seer = true;
-        } else if (
-          disconnectedPlayer.role === "doctor" &&
-          this.nightActions.doctor === undefined
-        ) {
-          this.nightActions.doctor = null;
+        switch (disconnectedPlayer.role) {
+          case "werewolf":
+            if (this.nightActions.werewolf === undefined) {
+              this.nightActions.werewolf = null;
+            }
+            break;
+          case "seer":
+            if (!this.nightActions.seer) {
+              this.nightActions.seer = true;
+            }
+            break;
+          case "doctor":
+            if (this.nightActions.doctor === undefined) {
+              this.nightActions.doctor = null;
+            }
+            break;
+          case "bodyguard":
+            if (this.nightActions.bodyguard === undefined) {
+              this.nightActions.bodyguard = null;
+            }
+            break;
+          case "witch":
+            if (this.nightActions.witch === undefined) {
+              this.nightActions.witch = { action: "none" };
+            }
+            break;
+          // Add other roles as needed
         }
       } else if (
         this.currentPhase === "day" &&
@@ -576,22 +789,33 @@ class GameStateManager {
 
       // Broadcast updated player list after disconnection
       this.broadcastPlayerList();
+
+      // If the disconnected player was an AI, remove it from aiPlayers
+      if (this.aiPlayers.has(disconnectedPlayer.id)) {
+        this.aiPlayers.delete(disconnectedPlayer.id);
+      }
     }
   }
 
   autoResolveNightActions() {
-    if (!this.nightActions.werewolf) {
-      this.autoResolveWerewolfAction();
-    }
-    if (!this.nightActions.seer) {
-      this.autoResolveSeerAction();
-    }
-    if (!this.nightActions.doctor) {
-      this.autoResolveDoctorAction();
-    }
+    const roles = ["werewolf", "seer", "doctor", "bodyguard", "witch"];
+
+    roles.forEach((role) => {
+      if (!this.nightActions[role]) {
+        const autoResolveMethod = `autoResolve${
+          role.charAt(0).toUpperCase() + role.slice(1)
+        }Action`;
+        if (typeof this[autoResolveMethod] === "function") {
+          this[autoResolveMethod]();
+        } else {
+          console.warn(`Auto-resolve method not found for role: ${role}`);
+        }
+      }
+    });
   }
 
   autoResolveWerewolfAction() {
+    console.log("AUTO RESOLVE WEREWOLF ACTION", this.nightActions.werewolf);
     if (this.nightActions.werewolf) return; // Action already taken
 
     const werewolves = this.players.filter(
@@ -608,61 +832,68 @@ class GameStateManager {
       possibleTargets[Math.floor(Math.random() * possibleTargets.length)];
     this.nightActions.werewolf = randomTarget.id;
 
-    // Inform werewolves of the auto-selected target
+    // Only inform human werewolves
     werewolves.forEach((werewolf) => {
-      this.io
-        .to(werewolf.socketId)
-        .emit("autoWerewolfAction", { targetId: randomTarget.id });
+      if (!werewolf.isAI) {
+        this.io
+          .to(werewolf.socketId)
+          .emit("autoWerewolfAction", { targetId: randomTarget.id });
+      }
     });
   }
 
   autoResolveSeerAction() {
     const seer = this.players.find((p) => p.role === "seer" && p.isAlive);
-    if (!seer || this.nightActions.seer) return; // No alive seer or action already taken
+    if (!seer || this.nightActions.seer) return;
 
     const possibleTargets = this.players.filter(
       (p) => p.isAlive && p.id !== seer.id
     );
-    if (possibleTargets.length === 0) return; // No possible targets
+    if (possibleTargets.length === 0) return;
 
     const randomTarget =
       possibleTargets[Math.floor(Math.random() * possibleTargets.length)];
     const targetRole = randomTarget.role;
 
-    this.nightActions.seer = true; // Mark seer action as completed
-    this.io
-      .to(seer.socketId)
-      .emit("autoSeerResult", { targetId: randomTarget.id, role: targetRole });
+    this.nightActions.seer = true;
+    if (!seer.isAI) {
+      this.io.to(seer.socketId).emit("autoSeerResult", {
+        targetId: randomTarget.id,
+        role: targetRole,
+      });
+    }
   }
 
   autoResolveDoctorAction() {
     const doctor = this.players.find((p) => p.role === "doctor" && p.isAlive);
-    if (!doctor || this.nightActions.doctor !== undefined) return; // No alive doctor or action already taken
+    if (!doctor || this.nightActions.doctor !== undefined) return;
 
     const possibleTargets = this.players.filter((p) => p.isAlive);
-    if (possibleTargets.length === 0) return; // No possible targets
+    if (possibleTargets.length === 0) return;
 
     const randomTarget =
       possibleTargets[Math.floor(Math.random() * possibleTargets.length)];
     this.nightActions.doctor = randomTarget.id;
 
-    // Inform doctor of the auto-selected target
-    this.io
-      .to(doctor.socketId)
-      .emit("autoDoctorAction", { targetId: randomTarget.id });
+    if (!doctor.isAI) {
+      this.io
+        .to(doctor.socketId)
+        .emit("autoDoctorAction", { targetId: randomTarget.id });
+    }
   }
 
   autoResolveVoting() {
     const alivePlayers = this.players.filter((p) => p.isAlive);
-
     alivePlayers.forEach((player) => {
       if (!this.votes[player.id]) {
-        const possibleTargets = alivePlayers.filter((p) => p.id !== player.id);
-        if (possibleTargets.length > 0) {
-          const randomTarget =
-            possibleTargets[Math.floor(Math.random() * possibleTargets.length)];
-          this.votes[player.id] = randomTarget.id;
-        }
+        // Randomly vote for an alive player or 'noLynch' if enabled
+        const voteOptions = [
+          ...alivePlayers.map((p) => p.id),
+          this.game.noLynchOption ? "noLynch" : null,
+        ].filter(Boolean);
+        const randomVote =
+          voteOptions[Math.floor(Math.random() * voteOptions.length)];
+        this.handleVote(player.id, randomVote);
       }
     });
   }
@@ -782,12 +1013,389 @@ class GameStateManager {
   }
 
   async saveGameState() {
-    this.game.currentPhase = this.currentPhase;
-    this.game.nightActions = this.nightActions;
-    this.game.votes = new Map(Object.entries(this.votes));
-    this.game.phaseStartTime = this.phaseStartTime;
-    this.game.phaseDuration = this.phaseDuration;
-    await this.game.save();
+    try {
+      // Create an update object with only defined values
+      const updateObj = {};
+
+      if (this.currentPhase !== null && this.currentPhase !== undefined) {
+        updateObj.currentPhase = this.currentPhase;
+      }
+
+      if (Object.keys(this.nightActions).length > 0) {
+        updateObj.nightActions = this.nightActions;
+      }
+
+      if (Object.keys(this.votes).length > 0) {
+        updateObj.votes = new Map(Object.entries(this.votes));
+      }
+
+      if (this.phaseStartTime !== null && this.phaseStartTime !== undefined) {
+        updateObj.phaseStartTime = this.phaseStartTime;
+      }
+
+      if (this.phaseDuration !== null && this.phaseDuration !== undefined) {
+        updateObj.phaseDuration = this.phaseDuration;
+      }
+
+      // Only update if there are valid fields to update
+      if (Object.keys(updateObj).length > 0) {
+        await Game.findByIdAndUpdate(this.gameId, updateObj, { new: true });
+      } else {
+        console.warn("No valid game state changes to save");
+      }
+    } catch (error) {
+      console.error("Error saving game state:", error);
+      throw error;
+    }
+  }
+
+  async addSpectator(gameId, userId) {
+    const user = await User.findById(userId);
+    if (!user) throw new Error("User not found");
+
+    this.game = await Game.findOne({ _id: gameId || this.gameId });
+
+    if (!this.game.spectators.includes(userId)) {
+      this.game.spectators.push(userId);
+      await this.game.save();
+    }
+
+    // Send current game state to the spectator
+    this.io.to(user.socketId).emit("gameState", this.getGameState());
+  }
+
+  removeSpectator(userId) {
+    this.game.spectators = this.game.spectators.filter(
+      (id) => id.toString() !== userId
+    );
+    this.game.save();
+  }
+
+  getGameState() {
+    return {
+      players: this.players.map((p) => ({
+        id: p.id,
+        username: p.isAI ? p.username : p.userId.username,
+        isAlive: p.isAlive,
+        isAI: p.isAI,
+        role: p.role, // Note: This reveals all roles to spectators
+      })),
+      currentPhase: this.currentPhase,
+      // Add other relevant game state information
+    };
+  }
+
+  broadcastGameState() {
+    const gameState = this.getGameState();
+    this.io.to(this.gameId).emit("gameState", gameState);
+  }
+
+  // Add new methods for new roles
+  async handleBodyguardAction() {
+    const bodyguard = this.players.find(
+      (p) => p.role === "bodyguard" && p.isAlive
+    );
+    if (!bodyguard) return;
+
+    // If bodyguard is AI, don't emit socket events
+    if (bodyguard.isAI) {
+      const alivePlayers = this.players.filter(
+        (p) => p.isAlive && p.id !== bodyguard.id
+      );
+      if (alivePlayers.length > 0) {
+        const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+        this.nightActions.bodyguard = randomTarget.id;
+        return;
+      }
+    }
+
+    return new Promise((resolve) => {
+      this.io.to(bodyguard.socketId).emit("bodyguardTurn", {
+        message: "Choose a player to protect tonight.",
+        players: this.players
+          .filter((p) => p.isAlive)
+          .map((p) => ({
+            id: p.id,
+            username: p.isAI ? p.username : p.userId.username
+          })),
+      });
+
+      const bodyguardActionHandler = ({ targetId }) => {
+        if (this.players.some((p) => p.id === targetId && p.isAlive)) {
+          this.nightActions.bodyguard = targetId;
+          this.io
+            .to(bodyguard.socketId)
+            .emit("actionConfirmation", { role: "bodyguard", targetId });
+        }
+        this.io.removeListener("bodyguardAction", bodyguardActionHandler);
+        resolve();
+      };
+
+      this.io.on("bodyguardAction", bodyguardActionHandler);
+
+      setTimeout(() => {
+        if (this.io.listeners("bodyguardAction").includes(bodyguardActionHandler)) {
+          this.io.removeListener("bodyguardAction", bodyguardActionHandler);
+          this.autoResolveBodyguardAction();
+          resolve();
+        }
+      }, this.phaseTimers.night);
+    });
+  }
+
+  async autoResolveBodyguardAction() {
+    const bodyguard = this.players.find(
+      (p) => p.role === "bodyguard" && p.isAlive
+    );
+    if (!bodyguard) return;
+
+    const alivePlayers = this.players.filter(
+      (p) => p.isAlive && p.id !== bodyguard.id
+    );
+    if (alivePlayers.length > 0) {
+      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+      this.nightActions.bodyguard = randomTarget.id;
+      
+      // Only emit confirmation if bodyguard is human
+      if (!bodyguard.isAI) {
+        this.io.to(bodyguard.socketId).emit("actionConfirmation", {
+          role: "bodyguard",
+          targetId: randomTarget.id,
+        });
+      }
+    }
+  }
+
+  async handleWitchAction() {
+    const witch = this.players.find((p) => p.role === "witch" && p.isAlive);
+    if (!witch) return;
+
+    const witchPotions = witch.potions || { heal: true, kill: true };
+    const werewolfTarget = this.nightActions.werewolf;
+
+    // If witch is AI, handle action directly
+    if (witch.isAI) {
+      // Simple AI logic for witch
+      if (witchPotions.heal && werewolfTarget) {
+        this.nightActions.witch = { action: "heal", targetId: werewolfTarget };
+        witch.potions.heal = false;
+      } else if (witchPotions.kill) {
+        const alivePlayers = this.players.filter(p => p.isAlive && p.id !== witch.id);
+        if (alivePlayers.length > 0) {
+          const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+          this.nightActions.witch = { action: "kill", targetId: randomTarget.id };
+          witch.potions.kill = false;
+        }
+      } else {
+        this.nightActions.witch = { action: "none" };
+      }
+      return;
+    }
+
+    return new Promise((resolve) => {
+      this.io.to(witch.socketId).emit("witchTurn", {
+        message: "Choose your action for tonight.",
+        canHeal: witchPotions.heal,
+        canKill: witchPotions.kill,
+        werewolfTarget: werewolfTarget,
+        players: this.players
+          .filter((p) => p.isAlive)
+          .map((p) => ({
+            id: p.id,
+            username: p.isAI ? p.username : p.userId.username
+          })),
+      });
+
+      const witchActionHandler = ({ action, targetId }) => {
+        if (action === "heal" && witchPotions.heal && targetId === werewolfTarget) {
+          this.nightActions.witch = { action: "heal", targetId };
+          witch.potions.heal = false;
+        } else if (
+          action === "kill" &&
+          witchPotions.kill &&
+          this.players.some((p) => p.id === targetId && p.isAlive)
+        ) {
+          this.nightActions.witch = { action: "kill", targetId };
+          witch.potions.kill = false;
+        }
+        this.io
+          .to(witch.socketId)
+          .emit("actionConfirmation", { role: "witch", action, targetId });
+        this.io.removeListener("witchAction", witchActionHandler);
+        resolve();
+      };
+
+      this.io.on("witchAction", witchActionHandler);
+
+      setTimeout(() => {
+        if (this.io.listeners("witchAction").includes(witchActionHandler)) {
+          this.io.removeListener("witchAction", witchActionHandler);
+          this.autoResolveWitchAction();
+          resolve();
+        }
+      }, this.phaseTimers.night);
+    });
+  }
+
+  async autoResolveWitchAction() {
+    const witch = this.players.find((p) => p.role === "witch" && p.isAlive);
+    if (!witch) return;
+
+    this.nightActions.witch = { action: "none" };
+    
+    // Only emit confirmation if witch is human
+    if (!witch.isAI) {
+      this.io.to(witch.socketId).emit("actionConfirmation", {
+        role: "witch",
+        action: "none"
+      });
+    }
+  }
+
+  async eliminatePlayer(playerId, eliminationType) {
+    const player = this.players.find((p) => p.id === playerId);
+    if (!player || !player.isAlive) return;
+
+    player.isAlive = false;
+    await player.save();
+
+    console.log(
+      `Player ${player.id} (${player.role}) has been eliminated by ${eliminationType}`
+    );
+    this.io.to(this.gameId).emit("playerEliminated", {
+      playerId: player.id,
+      role: player.role,
+      eliminationType: eliminationType,
+    });
+
+    // Trigger Hunter's ability if the eliminated player is a Hunter
+    if (player.role === "hunter") {
+      await this.handleHunterAction(playerId);
+    }
+
+    // Check for game end condition after elimination
+    this.checkGameEnd();
+  }
+
+  async handleHunterAction(hunterId) {
+    const hunter = this.players.find((p) => p.id === hunterId);
+    if (!hunter) return;
+
+    const alivePlayers = this.players.filter(
+      (p) => p.isAlive && p.id !== hunterId
+    );
+
+    // If hunter is AI, handle action directly
+    if (hunter.isAI) {
+      if (alivePlayers.length > 0) {
+        const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+        this.eliminatePlayer(randomTarget.id, "hunter");
+        
+        // Broadcast the AI hunter's action to all players
+        this.io.to(this.gameId).emit("hunterAction", {
+          hunterId: hunterId,
+          targetId: randomTarget.id,
+          targetName: randomTarget.isAI ? randomTarget.username : randomTarget.userId.username,
+          isAIHunter: true
+        });
+      }
+      return;
+    }
+
+    // Handle human hunter
+    return new Promise((resolve) => {
+      this.io.to(hunter.socketId).emit("hunterTurn", {
+        message: "You've been eliminated! Choose a player to eliminate with you.",
+        players: alivePlayers.map((p) => ({
+          id: p.id,
+          username: p.isAI ? p.username : p.userId.username,
+        })),
+      });
+
+      const hunterActionHandler = ({ targetId }) => {
+        const target = alivePlayers.find((p) => p.id === targetId);
+        if (target) {
+          this.eliminatePlayer(targetId, "hunter");
+          this.io.to(this.gameId).emit("hunterAction", {
+            hunterId: hunterId,
+            targetId: targetId,
+            targetName: target.isAI ? target.username : target.userId.username,
+            isAIHunter: false
+          });
+        }
+        this.io.removeListener("hunterAction", hunterActionHandler);
+        resolve();
+      };
+
+      this.io.on("hunterAction", hunterActionHandler);
+
+      // Auto-resolve if the Hunter doesn't choose within a time limit
+      setTimeout(() => {
+        if (this.io.listeners("hunterAction").includes(hunterActionHandler)) {
+          this.io.removeListener("hunterAction", hunterActionHandler);
+          this.autoResolveHunterAction(hunterId, alivePlayers);
+          resolve();
+        }
+      }, 30000); // 30 seconds to choose
+    });
+  }
+
+  autoResolveHunterAction(hunterId, alivePlayers) {
+    if (alivePlayers.length > 0) {
+      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+      this.eliminatePlayer(randomTarget.id, "hunter");
+
+      const hunter = this.players.find(p => p.id === hunterId);
+      
+      // Broadcast to all players
+      this.io.to(this.gameId).emit("hunterAction", {
+        hunterId: hunterId,
+        targetId: randomTarget.id,
+        targetName: randomTarget.isAI ? randomTarget.username : randomTarget.userId.username,
+        isAIHunter: hunter?.isAI || false,
+        wasAutoResolved: true
+      });
+    }
+  }
+
+  async handleAIActions(phase) {
+    for (const [playerId, aiPlayer] of this.aiPlayers) {
+      if (this.players.find((p) => p.id === playerId && p.isAlive)) {
+        const decision = await aiPlayer.makeDecision(this.getGameState());
+        await this.handlePlayerAction(playerId, decision, phase);
+      }
+    }
+  }
+
+  async handlePlayerAction(playerId, action, phase) {
+    const player = this.players.find((p) => p.id === playerId);
+    if (!player) return;
+
+    switch (phase) {
+      case "night":
+        switch (player.role) {
+          case "werewolf":
+            await this.handleWerewolfAction(playerId, action);
+            break;
+          case "seer":
+            await this.handleSeerAction(playerId, action);
+            break;
+          case "doctor":
+            await this.handleDoctorAction(playerId, action);
+            break;
+          case "bodyguard":
+            await this.handleBodyguardAction(playerId, action);
+            break;
+          case "witch":
+            await this.handleWitchAction(playerId, action);
+            break;
+          // Add other roles as needed
+        }
+        break;
+      case "day":
+        await this.handleVote(playerId, action);
+        break;
+    }
   }
 }
 

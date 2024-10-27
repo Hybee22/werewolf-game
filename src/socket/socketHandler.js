@@ -87,7 +87,7 @@ module.exports = (io) => {
     socket.on("vote", async ({ gameId, playerId, targetId }) => {
       const gameManager = await gameService.getGameManager(gameId, io);
       if (gameManager) {
-        gameStateManager.handleVote(playerId, targetId);
+        await gameStateManager.handleVote(playerId, targetId);
         console.log(
           `Vote in game ${gameId}: ${playerId} voting for ${targetId}`
         );
@@ -123,6 +123,52 @@ module.exports = (io) => {
     socket.on("disconnect", () => {
       console.log("Client disconnected");
       gameService.handlePlayerDisconnect(socket.id);
+    });
+
+    socket.on("joinAsSpectator", async ({ gameId, userId }) => {
+      try {
+        const gameManager = await gameService.getGameManager(gameId, io);
+        if (gameManager) {
+          await gameStateManager.addSpectator(gameId, userId);
+          socket.join(gameId);
+          socket.emit("joinedAsSpectator", { gameId });
+        } else {
+          socket.emit("error", "Game not found");
+        }
+      } catch (error) {
+        console.log(`Error joining as spectator: ${error.message}`);
+        socket.emit("error", error.message);
+      }
+    });
+
+    socket.on("leaveAsSpectator", async ({ gameId, userId }) => {
+      try {
+        const gameManager = await gameService.getGameManager(gameId, io);
+        if (gameManager) {
+          gameStateManager.removeSpectator(userId);
+          socket.leave(gameId);
+          socket.emit("leftAsSpectator", { gameId });
+        }
+      } catch (error) {
+        console.log(`Error leaving as spectator: ${error.message}`);
+        socket.emit("error", error.message);
+      }
+    });
+
+    ["werewolf", "seer", "doctor"].forEach(role => {
+      socket.on(`${role}Action`, async ({ gameId, playerId, targetId }) => {
+        try {
+          const gameManager = await gameService.getGameManager(gameId, io);
+          if (gameManager) {
+            await gameStateManager.handlePlayerNightAction({ id: playerId, role }, targetId);
+          } else {
+            socket.emit("error", "Game not found");
+          }
+        } catch (error) {
+          console.log(`Error processing ${role} action: ${error.message}`);
+          socket.emit("error", error.message);
+        }
+      });
     });
   });
 };

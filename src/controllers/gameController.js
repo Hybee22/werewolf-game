@@ -3,7 +3,8 @@ const gameService = require("../services/gameService");
 exports.createGame = async (req, res, next) => {
   try {
     const userId = req.session.userId;
-    const game = await gameService.createGame(userId);
+    const { options } = req.body;
+    const game = await gameService.createGame({ userId, options });
     res.status(201).json({ gameId: game._id });
   } catch (error) {
     next(error);
