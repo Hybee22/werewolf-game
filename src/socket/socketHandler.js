@@ -129,7 +129,7 @@ module.exports = (io) => {
       try {
         const gameManager = await gameService.getGameManager(gameId, io);
         if (gameManager) {
-          await gameStateManager.addSpectator(userId);
+          await gameStateManager.addSpectator(gameId, userId);
           socket.join(gameId);
           socket.emit("joinedAsSpectator", { gameId });
         } else {

@@ -19,7 +19,7 @@ exports.login = async (req, res, next) => {
     res.json({
       message: "Logged in successfully",
       data: {
-        playerId: user._id,
+        userId: user._id,
         username: user.username,
       },
     });

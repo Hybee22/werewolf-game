@@ -14,7 +14,7 @@ exports.createGame = async ({
     noLynch: true,
     timer: { night: 30000, discussion: 120000, voting: 30000 },
     autoResolveActions: false,
-    aiPlayerCount: 5,
+    aiPlayerCount: 0,
   },
 }) => {
   const gameId = generateGameId();
@@ -41,13 +41,15 @@ exports.createGame = async ({
   // Create AI players
   for (let i = 0; i < options.aiPlayerCount; i++) {
     const aiPlayer = new Player({
-      userId: `AI_${i}`,
-      username: `AI_${i}`,
+      username: `AI Player ${i + 1}`, // More friendly name
       isAI: true,
       isAlive: true,
       isConnected: true,
+      gameId: game._id,
+      // Note: we're not setting userId for AI players
     });
-    game.players.push(aiPlayer);
+    await aiPlayer.save();
+    game.players.push(aiPlayer._id);
   }
 
   // Assign roles to all players (human and AI)

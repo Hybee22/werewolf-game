@@ -30,7 +30,7 @@ const gameSchema = new mongoose.Schema({
     seer: String
   },
   votes: { type: Map, of: String },
-  phaseStartTime: Date,
+  phaseStartTime: Number,
   phaseDuration: Number,
   messages: [{
     playerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
