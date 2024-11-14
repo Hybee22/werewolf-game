@@ -1074,27 +1074,43 @@ class GameStateManager {
   }
 
   async addSpectator(gameId, userId) {
-    console.log("ADDING SPECTATOR", this.io)
-    const user = await User.findById(userId);
-    if (!user) throw new Error("User not found");
+    try {
+        console.log("ADDING SPECTATOR", this.io);
+        const user = await User.findById(userId);
+        if (!user) throw new Error("User not found");
 
-    this.game = await Game.findOne({ _id: this.gameId || gameId });
+        this.game = await Game.findOne({ _id: this.gameId || gameId });
 
-    if (!this.game.spectators.includes(userId)) {
-      this.game.spectators.push(userId);
-      await this.game.save();
+        if (!this.game.spectators.includes(userId)) {
+            this.game.spectators.push(userId);
+            await this.game.save();
+        }
+
+        // Notify all players about the new spectator
+        this.io.emit("notification", `${user.username} has joined as a spectator`);
+
+        // Send current game state to the spectator
+        this.io.to(user.socketId).emit("gameState", this.getGameState());
+    } catch (error) {
+        console.error("Error adding spectator:", error);
     }
+}
 
-    // Send current game state to the spectator
-    this.io.to(user.socketId).emit("gameState", this.getGameState());
-  }
+async removeSpectator(gameId, userId) {
+  try {
+        this.game = await Game.findOne({ _id: this.gameId || gameId });
+        this.game.spectators = this.game.spectators.filter(
+            (id) => id.toString() !== userId
+        );
+        this.game.save();
 
-  removeSpectator(userId) {
-    this.game.spectators = this.game.spectators.filter(
-      (id) => id.toString() !== userId
-    );
-    this.game.save();
-  }
+        // Notify all players about the spectator leaving
+        const user = await User.findById(userId);
+        this.io.emit("notification", `${user.username} has left as a spectator`);
+    } catch (error) {
+        console.error("Error removing spectator:", error);
+    }
+}
 
   getGameState() {
     return {
@@ -1110,7 +1126,10 @@ class GameStateManager {
       nightActions: this.nightActions,
       lastProtectedId: this.lastProtectedId, // For bodyguard
       investigatedPlayers: this.investigatedPlayers, // For seer
-      // ... other game state properties
+      spectators: this.game.spectators.map(async (id) => {
+        const user = await User.findById(id);
+        return { id: user.id, username: user.username };
+    })
     };
   }
 

@@ -145,7 +145,11 @@ module.exports = (io) => {
       try {
         const gameManager = await gameService.getGameManager(gameId, io);
         if (gameManager) {
+<<<<<<< Updated upstream
           gameManager.removeSpectator(userId);
+=======
+          await gameStateManager.removeSpectator(gameId, userId);
+>>>>>>> Stashed changes
           socket.leave(gameId);
           socket.emit("leftAsSpectator", { gameId });
         }
