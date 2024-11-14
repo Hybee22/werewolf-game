@@ -15,6 +15,10 @@ const playerSchema = new mongoose.Schema({
   role: String,
   gameId: { type: mongoose.Schema.Types.ObjectId, ref: 'Game' },
   socketId: String,
+  potions: {
+    heal: { type: Boolean, default: true },
+    kill: { type: Boolean, default: true }
+  }
 });
 
 module.exports = mongoose.model('Player', playerSchema);

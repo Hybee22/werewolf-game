@@ -51,7 +51,7 @@ module.exports = (io) => {
     socket.on("werewolfAction", async ({ gameId, playerId, targetId }) => {
       const gameManager = await gameService.getGameManager(gameId, io);
       if (gameManager) {
-        gameStateManager.handleWerewolfAction(playerId, targetId);
+        await gameStateManager.handleWerewolfAction(playerId, targetId);
         console.log(
           `Werewolf action in game ${gameId}: ${playerId} targeting ${targetId}`
         );
@@ -63,7 +63,7 @@ module.exports = (io) => {
     socket.on("seerAction", async ({ gameId, playerId, targetId }) => {
       const gameManager = await gameService.getGameManager(gameId, io);
       if (gameManager) {
-        gameStateManager.handleSeerAction(playerId, targetId);
+        await gameStateManager.handleSeerAction(playerId, targetId);
         console.log(
           `Seer action in game ${gameId}: ${playerId} targeting ${targetId}`
         );
@@ -75,7 +75,7 @@ module.exports = (io) => {
     socket.on("doctorAction", async ({ gameId, playerId, targetId }) => {
       const gameManager = await gameService.getGameManager(gameId, io);
       if (gameManager) {
-        gameStateManager.handleDoctorAction(playerId, targetId);
+        await gameStateManager.handleDoctorAction(playerId, targetId);
         console.log(
           `Doctor action in game ${gameId}: ${playerId} targeting ${targetId}`
         );
@@ -129,7 +129,7 @@ module.exports = (io) => {
       try {
         const gameManager = await gameService.getGameManager(gameId, io);
         if (gameManager) {
-          await gameStateManager.addSpectator(gameId, userId);
+          await gameManager.addSpectator(gameId, userId);
           socket.join(gameId);
           socket.emit("joinedAsSpectator", { gameId });
         } else {
@@ -145,7 +145,7 @@ module.exports = (io) => {
       try {
         const gameManager = await gameService.getGameManager(gameId, io);
         if (gameManager) {
-          gameStateManager.removeSpectator(userId);
+          gameManager.removeSpectator(userId);
           socket.leave(gameId);
           socket.emit("leftAsSpectator", { gameId });
         }
@@ -155,20 +155,43 @@ module.exports = (io) => {
       }
     });
 
-    ["werewolf", "seer", "doctor"].forEach(role => {
-      socket.on(`${role}Action`, async ({ gameId, playerId, targetId }) => {
-        try {
-          const gameManager = await gameService.getGameManager(gameId, io);
-          if (gameManager) {
-            await gameStateManager.handlePlayerNightAction({ id: playerId, role }, targetId);
-          } else {
-            socket.emit("error", "Game not found");
-          }
-        } catch (error) {
-          console.log(`Error processing ${role} action: ${error.message}`);
-          socket.emit("error", error.message);
-        }
-      });
+    // Bodyguard action handler
+    socket.on("bodyguardAction", async ({ gameId, playerId, targetId }) => {
+      const gameManager = await gameService.getGameManager(gameId, io);
+      if (gameManager) {
+        await gameStateManager.handleBodyguardAction(playerId, targetId);
+        console.log(
+          `Bodyguard action in game ${gameId}: ${playerId} targeting ${targetId}`
+        );
+      } else {
+        console.log(`Bodyguard action failed: Game ${gameId} not found`);
+      }
+    });
+
+    // Witch action handler
+    socket.on("witchAction", async ({ gameId, playerId, action, targetId }) => {
+      const gameManager = await gameService.getGameManager(gameId, io);
+      if (gameManager) {
+        await gameStateManager.handleWitchAction(playerId, { action, targetId });
+        console.log(
+          `Witch action in game ${gameId}: ${playerId} using ${action} on ${targetId}`
+        );
+      } else {
+        console.log(`Witch action failed: Game ${gameId} not found`);
+      }
+    });
+
+    // Hunter action handler
+    socket.on("hunterAction", async ({ gameId, hunterId, targetId }) => {
+      const gameManager = await gameService.getGameManager(gameId, io);
+      if (gameManager) {
+        await gameStateManager.handleHunterAction(hunterId, targetId);
+        console.log(
+          `Hunter action in game ${gameId}: ${hunterId} targeting ${targetId}`
+        );
+      } else {
+        console.log(`Hunter action failed: Game ${gameId} not found`);
+      }
     });
   });
 };

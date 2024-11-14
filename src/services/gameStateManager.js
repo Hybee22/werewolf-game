@@ -71,6 +71,10 @@ class GameStateManager {
     ];
 
     this.aiPlayers = new Map();
+
+    // Add these new properties
+    this.lastProtectedId = null;  // Track bodyguard's last protected player
+    this.investigatedPlayers = new Set();  // Track players investigated by seer
   }
 
   async initialize() {
@@ -151,24 +155,32 @@ class GameStateManager {
     const werewolves = [];
 
     for (let i = 0; i < this.players.length; i++) {
-      const player = this.players[i];
-      player.role = this.game.roles[i];
-      await player.save();
+      this.players[i].role = this.game.roles[i];
+      
+      // Initialize witch potions
+      if (this.players[i].role === "witch") {
+        this.players[i].potions = {
+          heal: true,
+          kill: true
+        };
+      }
+      
+      await this.players[i].save();
 
-      if (player.role === "werewolf") {
+      if (this.players[i].role === "werewolf") {
         werewolves.push({
-          username: player.isAI ? player.username : player.userId.username,
-          _id: player._id,
-          socketId: player.socketId,
-          isAI: player.isAI,
+          username: this.players[i].isAI ? this.players[i].username : this.players[i].userId.username,
+          _id: this.players[i]._id,
+          socketId: this.players[i].socketId,
+          isAI: this.players[i].isAI,
         });
       }
 
       // Only send role assignments to human players
-      if (!player.isAI) {
-        this.io.to(player.socketId).emit("roleAssigned", {
-          role: player.role,
-          description: this.roleDescriptions[player.role],
+      if (!this.players[i].isAI) {
+        this.io.to(this.players[i].socketId).emit("roleAssigned", {
+          role: this.players[i].role,
+          description: this.roleDescriptions[this.players[i].role],
         });
       }
     }
@@ -211,6 +223,9 @@ class GameStateManager {
 
     // Broadcast initial game state
     this.broadcastGameState();
+
+    this.lastProtectedId = null;
+    this.investigatedPlayers.clear();
   }
 
   async runGameLoop() {
@@ -699,6 +714,15 @@ class GameStateManager {
       this.players.find((p) => p.id === playerId && p.role === "seer")
     ) {
       const targetRole = this.players.find((p) => p.id === targetId).role;
+      
+      // Initialize investigatedPlayers if it doesn't exist
+      if (!this.investigatedPlayers) {
+        this.investigatedPlayers = new Set();
+      }
+      
+      // Add target to investigated players set
+      this.investigatedPlayers.add(targetId);
+      
       this.io.to(playerId).emit("seerResult", { targetId, role: targetRole });
     }
     await this.saveGameState();
@@ -1050,10 +1074,11 @@ class GameStateManager {
   }
 
   async addSpectator(gameId, userId) {
+    console.log("ADDING SPECTATOR", this.io)
     const user = await User.findById(userId);
     if (!user) throw new Error("User not found");
 
-    this.game = await Game.findOne({ _id: gameId || this.gameId });
+    this.game = await Game.findOne({ _id: this.gameId || gameId });
 
     if (!this.game.spectators.includes(userId)) {
       this.game.spectators.push(userId);
@@ -1077,11 +1102,15 @@ class GameStateManager {
         id: p.id,
         username: p.isAI ? p.username : p.userId.username,
         isAlive: p.isAlive,
+        role: p.role,
         isAI: p.isAI,
-        role: p.role, // Note: This reveals all roles to spectators
+        potions: p.role === 'witch' ? p.potions : undefined
       })),
       currentPhase: this.currentPhase,
-      // Add other relevant game state information
+      nightActions: this.nightActions,
+      lastProtectedId: this.lastProtectedId, // For bodyguard
+      investigatedPlayers: this.investigatedPlayers, // For seer
+      // ... other game state properties
     };
   }
 
@@ -1097,14 +1126,22 @@ class GameStateManager {
     );
     if (!bodyguard) return;
 
+    // Initialize lastProtectedId if it doesn't exist
+    if (!this.lastProtectedId) {
+      this.lastProtectedId = null;
+    }
+
     // If bodyguard is AI, don't emit socket events
     if (bodyguard.isAI) {
       const alivePlayers = this.players.filter(
-        (p) => p.isAlive && p.id !== bodyguard.id
+        (p) => p.isAlive && 
+        p.id !== bodyguard.id && 
+        p.id !== this.lastProtectedId // Can't protect same player twice
       );
       if (alivePlayers.length > 0) {
         const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
         this.nightActions.bodyguard = randomTarget.id;
+        this.lastProtectedId = randomTarget.id; // Track the protected player
         return;
       }
     }
@@ -1113,16 +1150,25 @@ class GameStateManager {
       this.io.to(bodyguard.socketId).emit("bodyguardTurn", {
         message: "Choose a player to protect tonight.",
         players: this.players
-          .filter((p) => p.isAlive)
+          .filter((p) => 
+            p.isAlive && 
+            p.id !== this.lastProtectedId // Filter out last protected player
+          )
           .map((p) => ({
             id: p.id,
             username: p.isAI ? p.username : p.userId.username
           })),
+        lastProtectedId: this.lastProtectedId // Send to client for UI feedback
       });
 
       const bodyguardActionHandler = ({ targetId }) => {
-        if (this.players.some((p) => p.id === targetId && p.isAlive)) {
+        if (this.players.some((p) => 
+          p.id === targetId && 
+          p.isAlive && 
+          p.id !== this.lastProtectedId
+        )) {
           this.nightActions.bodyguard = targetId;
+          this.lastProtectedId = targetId; // Track the protected player
           this.io
             .to(bodyguard.socketId)
             .emit("actionConfirmation", { role: "bodyguard", targetId });
@@ -1170,7 +1216,13 @@ class GameStateManager {
     const witch = this.players.find((p) => p.role === "witch" && p.isAlive);
     if (!witch) return;
 
-    const witchPotions = witch.potions || { heal: true, kill: true };
+    // Initialize potions if they don't exist
+    if (!witch.potions) {
+      witch.potions = { heal: true, kill: true };
+      await witch.save();
+    }
+
+    const witchPotions = witch.potions;
     const werewolfTarget = this.nightActions.werewolf;
 
     // If witch is AI, handle action directly
@@ -1179,12 +1231,14 @@ class GameStateManager {
       if (witchPotions.heal && werewolfTarget) {
         this.nightActions.witch = { action: "heal", targetId: werewolfTarget };
         witch.potions.heal = false;
+        await witch.save();
       } else if (witchPotions.kill) {
         const alivePlayers = this.players.filter(p => p.isAlive && p.id !== witch.id);
         if (alivePlayers.length > 0) {
           const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
           this.nightActions.witch = { action: "kill", targetId: randomTarget.id };
           witch.potions.kill = false;
+          await witch.save();
         }
       } else {
         this.nightActions.witch = { action: "none" };
@@ -1210,6 +1264,7 @@ class GameStateManager {
         if (action === "heal" && witchPotions.heal && targetId === werewolfTarget) {
           this.nightActions.witch = { action: "heal", targetId };
           witch.potions.heal = false;
+          witch.save(); // Add save call
         } else if (
           action === "kill" &&
           witchPotions.kill &&
@@ -1217,6 +1272,7 @@ class GameStateManager {
         ) {
           this.nightActions.witch = { action: "kill", targetId };
           witch.potions.kill = false;
+          witch.save(); // Add save call
         }
         this.io
           .to(witch.socketId)
